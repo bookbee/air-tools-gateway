@@ -1,0 +1,8 @@
+dist/
+coverage/
+node_modules/
+package-lock.json
+# Copied verbatim from air-orchestrator-service; never reformatted here.
+contract/
+# Briefs and backlog are prose; keep their wrapping as written.
+docs/

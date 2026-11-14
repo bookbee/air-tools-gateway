@@ -45,6 +45,7 @@ Dev raw keys (only their digests go in `.env.example`): `airtg_read_local_dev` /
 **Request pipeline (every route):** request id (`X-Request-ID`, echoed) → auth and scope check → capability lookup by name **and route kind** (a wrong kind gives 404 `unknown_capability`) → envelope validation (closed, gives 400) → Ajv argument validation (400) → subject check (400) → handler under an `AbortSignal` timeout (timeout gives 504 `upstream_timeout`, backend failure gives 502 `upstream_error`) → response shaping to contract fields only. A single error handler turns every `Problem` into RFC 9457 `application/problem+json` with a closed-set `code`. Any other error becomes a fixed 500 and its stack is logged, never returned.
 
 **Propose and execute must be exactly right** (`src/actions/`, see handoff §7). Propose runs `prepare()` and, on success, stores a `gp_…` proposal with a TTL of at most 10 min. Execute requires an `Idempotency-Key` and runs these steps in order:
+
 1. Replay check on `(tenant, key)`.
 2. Tenant-scoped proposal lookup. Wrong subject, wrong capability and missing proposal all give the same 404.
 3. Per-proposal lock, then a second replay check.
