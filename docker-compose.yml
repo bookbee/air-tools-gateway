@@ -1,0 +1,65 @@
+# air-tools-gateway — this service, and nothing else.
+#
+# Joins the platform's shared `air-net` network (owned by air-infrastructure-service) as its
+# default network, so air-orchestrator-service reaches it as http://air-tools-gateway:8080.
+# From the host it is http://localhost:8084, its slot in the AIR port map.
+#
+#   cd ../air-infrastructure-service && make up   # creates air-net
+#   make up                                       # here (checks air-net first)
+#   docker compose up -d --build air-tools-gateway   # the same, without the check
+#
+# Without air-infra's stack: `make up INFRA=none` (docker-compose.standalone.yml swaps in
+# this project's own network and nothing else).
+#
+# The fixture order store is in memory: `docker compose restart air-tools-gateway` resets it.
+#
+# Production never uses this file: real key digests and backends come from the deployment.
+name: air-tools-gateway
+
+services:
+  air-tools-gateway:
+    build:
+      context: .
+      target: runtime
+    image: air-tools-gateway:local
+    ports:
+      - "${AIR_TOOLS_GATEWAY_PORT:-8084}:8080"
+    environment:
+      AIR_TOOLS_GATEWAY__APP__ENV: development
+      AIR_TOOLS_GATEWAY__HTTP__PORT: "8080"
+      AIR_TOOLS_GATEWAY__LOG__FORMAT: json
+      AIR_TOOLS_GATEWAY__LOG__LEVEL: info
+      # The four development keys, as digests only (raw values in README.md):
+      #   brightcart read airtg_read_local_dev · execute airtg_exec_local_dev
+      #   othershop  read airtg_read_othershop_dev · execute airtg_exec_othershop_dev
+      AIR_TOOLS_GATEWAY__SECURITY__HASH_SALT: air-tools-gateway-dev-salt
+      AIR_TOOLS_GATEWAY__SECURITY__API_KEYS: >-
+        [{"id":"brightcart-read","tenant":"brightcart","scope":"read",
+        "key_hash":"b3f0f6f1af42deec3de69f9717b3362b9c1d8cb014d01699547e4ca9ed4bb72b"},
+        {"id":"brightcart-exec","tenant":"brightcart","scope":"execute",
+        "key_hash":"b5bd994a84a0b2108775a03e098dd26c93a73d25a7b15d53f21307e23d785330"},
+        {"id":"othershop-read","tenant":"othershop","scope":"read",
+        "key_hash":"78ed0c8f906097ad1cc9eae45ebc65971a137c245c2893c25157ac411100d9f9"},
+        {"id":"othershop-exec","tenant":"othershop","scope":"execute",
+        "key_hash":"a5fdaaaa76957070d241a89877d6614fca6e63159b2c1ad082697fe903ec506e"}]
+      AIR_TOOLS_GATEWAY__BACKEND__MODE: fixture
+      AIR_TOOLS_GATEWAY__BACKEND__FIXTURE_DIR: /app/fixtures
+      AIR_TOOLS_GATEWAY__ACTIONS__PROPOSAL_TTL_S: "600"
+      AIR_TOOLS_GATEWAY__ACTIONS__IDEMPOTENCY_TTL_S: "86400"
+    healthcheck:
+      # Liveness only, as the Dockerfile's.
+      test:
+        - CMD
+        - node
+        - -e
+        - "fetch('http://localhost:8080/v1/health').then(r=>process.exit(r.ok?0:1),()=>process.exit(1))"
+      interval: 15s
+      timeout: 3s
+      retries: 3
+      start_period: 5s
+    restart: unless-stopped
+
+networks:
+  default:
+    name: air-net
+    external: true

@@ -1,0 +1,13 @@
+# Run air-tools-gateway without air-infra's shared stack:
+#
+#   make up INFRA=none
+#   # = docker compose -f docker-compose.yml -f docker-compose.standalone.yml up -d --build
+#
+# docker-compose.yml joins `air-net` as `external` on purpose, so a missing shared stack is a
+# loud failure rather than a container the orchestrator can't find. This swaps the network
+# for this project's own bridge, created and removed by compose, and changes nothing else.
+
+networks:
+  default:
+    name: air-tools-gateway-net
+    external: false

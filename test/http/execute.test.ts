@@ -338,7 +338,7 @@ describe("an unknown outcome is not stored (test 23)", () => {
   it("a 504 execute is retried with the same key and returns done, with one change", async () => {
     const { app, store, calls, idempotency } = harness({
       loseFirstCancelAnswer: true,
-      timeoutMs: 50,
+      timeoutMs: 300, // only the lost cancel answer should hit it, never propose
     });
     const id = await propose(app);
     const lost = await execute(app, id);

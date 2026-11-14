@@ -6,11 +6,12 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 **air-tools-gateway** is the AIR platform's single gateway to business systems. It is a Node.js REST service that runs declared capabilities: lookups (`read`) and changes (`write`, behind propose then execute). Its only caller is air-orchestrator-service.
 
-The full build brief is `docs/handoff.md`. It covers layout, capability specs, fixture data, the required test list and what "done" means. Read it before starting a new piece of work. Open contract questions, interim v1 choices and post-v1 enhancements are tracked in `docs/enhancements.md`. Add to it rather than expanding v1 scope. The repo is being built from that brief. Until `package.json` and the `Makefile` exist, the commands below are the planned interface, not working commands.
+The full build brief is `docs/handoff.md`. It covers layout, capability specs, fixture data, the required test list and what "done" means. Read it before starting a new piece of work. Open contract questions, interim v1 choices and post-v1 enhancements are tracked in `docs/enhancements.md`. Add to it rather than expanding v1 scope.
 
 ## Ground rules
 
-- **The contract is fixed input.** `contract/openapi.yaml` is copied from `~/git/air-orchestrator-service/docs/specs/0012-tools-gateway/contract.openapi.yaml`, and the orchestrator's copy is authoritative. Don't redesign it or quietly diverge from it, because the orchestrator's test double enforces the same file. If it is wrong, ambiguous or unbuildable, stop and write the question down for the orchestrator session. Read its `info.description` (the 11 rules) and spec.md §2, §7 and §9 before changing behaviour.
+- **The contract is fixed input.** `contract/openapi.yaml` is copied from `~/git/air-orchestrator-service/docs/specs/0012-tools-gateway/contract.openapi.yaml`, and the orchestrator's copy is authoritative. Don't redesign it or quietly diverge from it, because the orchestrator's test double enforces the same file. If it is wrong, ambiguous or unbuildable, stop and write the question down in `docs/enhancements.md` §1 for the orchestrator session. Read its `info.description` (the 11 rules) and spec.md §2, §7 and §9 before changing behaviour.
+- **When the drift test fails** (`test/contract/contract.test.ts`, "byte-identical to the orchestrator's"), the orchestrator changed its copy. Diff the two, re-copy it byte-for-byte with `cp` (never hand-edit), adapt the code if needed, and log anything unversioned or unclear as a question.
 - **Do not edit other repos** (air-orchestrator-service, air-rag-service, air-model-gateway, air-infrastructure-service, air-classifier-service, air-web-console). Reading them is fine. `~/git/air-rag-service` is the closest sibling for conventions: key hashing, `/v1/ready`, compose on `air-net`, and `make run-sit`.
 - **No language model anywhere.** That means no LLM SDK, no prompts and no calls to air-model-gateway. The orchestrator picks the capability, and this service runs it deterministically.
 - **No generic passthrough.** No endpoint may forward a URL, method or body chosen by the caller. Every operation is a declared capability.
@@ -26,11 +27,12 @@ Config comes from env vars with prefix `AIR_TOOLS_GATEWAY__` and `__` nesting (e
 ## Commands (Makefile)
 
 - `make install`, `make env` (creates the gitignored `.env` from `.env.example`), `make key RAW=…` (prints the salted digest for a raw key)
-- `make dev` (watch mode, host port 8084), `make run`, `make run-sit` (host, fixture mode, 8084)
-- `make lint`, `make typecheck`, `make test`, **`make check`** (all three; must pass before calling work done)
-- `make up` / `down` / `logs` (Docker on `air-net`, host 8084 → container 8080; `make up` checks that `air-net` exists, which requires air-infrastructure-service to be running). `docker-compose.standalone.yml` runs without `air-net`.
-- `make smoke` runs `sit/smoke.sh` against `BASE_URL` (default `http://localhost:8084`)
-- Single test: `npx vitest run test/<file>.test.ts -t "<test name>"`
+- `make dev` (watch mode), `make run` (compiled), `make run-sit` (fixture mode, dev keys from `.env.example`). All on host port 8084; override with `PORT=…`.
+- `make lint`, `make typecheck`, `make test`, **`make check`** (all three; must pass before calling work done). `make docker-check` runs the same in `node:22-slim` when there's no host Node.
+- `make up` / `down` / `logs` / `status` (Docker on `air-net`, host 8084 → container 8080; `make up` checks that `air-net` exists, which requires air-infrastructure-service to be running). `make up INFRA=none` uses `docker-compose.standalone.yml`, without `air-net`. The compose file has the dev key digests inline, so `docker compose up -d --build air-tools-gateway` needs no `.env`.
+- `make smoke` runs `sit/smoke.sh` against `BASE_URL` (default `http://localhost:8084`). It cancels order 55120, so restart the service before running it again.
+- Single test: `npx vitest run test/http/execute.test.ts -t "<test name>"`
+- Node 22 on this machine is in `~/.local/node-22/bin` (official nodejs.org build). If `node` isn't found, prefix commands with `PATH="$HOME/.local/node-22/bin:$PATH"`.
 
 Dev raw keys (only their digests go in `.env.example`): `airtg_read_local_dev` / `airtg_exec_local_dev` (tenant `brightcart`), `airtg_read_othershop_dev` / `airtg_exec_othershop_dev` (tenant `othershop`).
 
@@ -57,7 +59,11 @@ Dev raw keys (only their digests go in `.env.example`): `airtg_read_local_dev` /
 
 **Storage:** v1 is single-replica and in-memory. `ProposalStore` and `IdempotencyStore` sit behind interfaces so Redis (via air-infra) can replace them later. Backends sit behind interfaces like `OrdersBackend`. In fixture mode the backend loads `fixtures/` at startup and mutates the data in memory, so a restart resets it. The fixtures include a second tenant, `othershop`, whose order `55120` collides with Brightcart's `55120`, so cross-tenant leakage shows up as wrong data rather than as a 404.
 
-**Testing:** `buildApp(config, deps)` takes no globals, so each test builds its own app and injects the clock and backends. Don't sleep in tests. Tests load `contract/openapi.yaml` and validate `/v1/capabilities` entries and all response bodies against it. The required behaviour tests are listed in `docs/handoff.md` §10.
+**Where things live:** `src/http/pipeline.ts` holds the shared pipeline (lookup hook, envelope schemas, `checkArguments`, `withDeadline`). Routes are in `src/http/routes/` (`tools.ts`, `actions.ts` for propose, `execute.ts`). Every route must declare `config.auth` (`"none" | "read" | "execute"`); a route without one is refused with a 500. Fastify's Ajv is configured in `app.ts` with `removeAdditional: false` and `coerceTypes: false`, so unknown body fields are a 400, not silently stripped. Don't undo that.
+
+**Write capabilities get `ExecuteCtx`** (`Ctx` plus `proposalId`) in `perform`. `orders.cancel` passes the proposal id to `OrdersBackend.cancel` as an idempotency reference: the same reference again returns `already_cancelled` with the first refund, which is what makes a retry after a 504 safe. Ownership is part of every backend query: lookups take `(tenant, customerId)` and return `null` for "not yours" exactly as for "missing".
+
+**Testing:** `buildApp(config, deps)` takes no globals, so each test builds its own app through `test/helpers/app.ts` (`buildTestApp`, `KEYS`, captured logs). Inject `TestClock` (`test/helpers/clock.ts`) and stand-in backends (`test/helpers/backends.ts`) instead of sleeping. Call routes with `inject(app, …)` from `test/helpers/contract.ts`, not `app.inject`: it checks every response's status, Content-Type and body against `contract/openapi.yaml`. Its `KNOWN_DEVIATIONS` lists the only undeclared responses allowed (C1: 400 on execute; C2: 500). The required behaviour tests are listed in `docs/handoff.md` §10.
 
 ## Repository conventions
 

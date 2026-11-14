@@ -37,10 +37,10 @@ const getOrder = (subject: string | null, orderId: string) => ({
   subject,
 });
 
-function appWith(backend: OrdersBackend) {
+function appWith(backend: OrdersBackend, timeoutMs = 2000) {
   return buildTestApp({
     ordersBackend: backend,
-    capabilities: orderCapabilities(backend, { timeoutMs: 50 }),
+    capabilities: orderCapabilities(backend, { timeoutMs }),
   });
 }
 
@@ -285,7 +285,7 @@ describe("unknown capability (test 11)", () => {
 
 describe("backend failures (test 12)", () => {
   it("a backend that does not answer in time is 504 upstream_timeout", async () => {
-    const { app } = appWith(hangingBackend());
+    const { app } = appWith(hangingBackend(), 50);
     const res = await call(app, "orders.list_recent", listRecent("cust_1001"));
     expect(res.statusCode).toBe(504);
     expect(res.json()).toMatchObject({ code: "upstream_timeout" });
