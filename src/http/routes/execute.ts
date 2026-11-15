@@ -3,7 +3,9 @@
  * exactly right":
  *
  *   1. Replay check first: a stored response for (tenant, Idempotency-Key) is returned
- *      unchanged, and nothing else happens.
+ *      unchanged, and nothing else happens. The record is bound to the request it was first
+ *      stored for (proposal, subject, capability): the same key with another request is
+ *      400 invalid_arguments and nothing happens (TG-001, decision C12 revised).
  *   2. The proposal, looked up within the key's tenant. Missing, another subject, or another
  *      capability than :name are one identical 404.
  *   3. The per-proposal lock (in-process, or Redis across replicas); the replay check again
@@ -74,6 +76,27 @@ export function newExecutionId(): string {
  * perform(). A distributed lock expires after `timeoutMs + LOCK_MARGIN_MS`.
  */
 export const LOCK_MARGIN_MS = 5000;
+
+/** The same key with a different request: refused, not replayed, never stored (TG-001). */
+const keyReused = () =>
+  new Problem(
+    "invalid_arguments",
+    "This Idempotency-Key was already used for a different request.",
+  );
+
+/** Whether a stored record belongs to this request. Older records carry only a proposal id. */
+function sameRequest(
+  stored: StoredResponse,
+  proposalId: string,
+  subject: string | null,
+  capability: string,
+): boolean {
+  return (
+    stored.proposalId === proposalId &&
+    (stored.subject === undefined || stored.subject === subject) &&
+    (stored.capability === undefined || stored.capability === capability)
+  );
+}
 
 /** One answer for "missing", "not this subject's" and "not this capability's". */
 const proposalNotFound = () => new Problem("not_found", "No such proposal.");
@@ -191,12 +214,19 @@ export function executeRoutes(deps: ExecuteDeps) {
     idempotencyKey: string,
   ): Promise<StoredResponse> {
     const { tenant } = request.identity!;
+    /** A stored record for this key: replayed if it is this request's, refused otherwise. */
+    const replayOrRefuse = (stored: StoredResponse): StoredResponse => {
+      if (!sameRequest(stored, proposalId, subject, capability.name)) {
+        request.log.warn({ proposal_id: proposalId }, "action.idempotency_key_reused");
+        throw keyReused();
+      }
+      request.log.info({ proposal_id: stored.proposalId }, "action.replayed");
+      return stored;
+    };
+
     // 1. Replay first.
     const replay = await deps.idempotency.get(tenant, idempotencyKey);
-    if (replay !== null) {
-      request.log.info({ proposal_id: replay.proposalId }, "action.replayed");
-      return replay;
-    }
+    if (replay !== null) return replayOrRefuse(replay);
 
     // 2. Tenant-scoped lookup; three mismatches, one answer.
     const proposal = await deps.proposals.get(tenant, proposalId);
@@ -216,10 +246,19 @@ export function executeRoutes(deps: ExecuteDeps) {
         { holdMs, waitMs: holdMs },
         async () => {
           const again = await deps.idempotency.get(tenant, idempotencyKey);
-          if (again !== null) return again;
+          if (again !== null) return replayOrRefuse(again);
           const decided = await decide(request, capability, proposal);
           // 7. Stored before the lock is released; the first stored response wins.
-          return deps.idempotency.putIfAbsent(tenant, idempotencyKey, decided);
+          const stored = await deps.idempotency.putIfAbsent(tenant, idempotencyKey, {
+            ...decided,
+            subject,
+            capability: capability.name,
+          });
+          if (sameRequest(stored, proposalId, subject, capability.name)) return stored;
+          // A reused key raced us (another proposal's execute stored first, under its own
+          // lock). This proposal was still decided: answer its real outcome, unstored.
+          request.log.warn({ proposal_id: proposalId }, "action.idempotency_key_reused");
+          return decided;
         },
       );
     } catch (error) {

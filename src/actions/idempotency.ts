@@ -14,8 +14,14 @@ export interface StoredResponse {
   readonly status: number;
   readonly contentType: string;
   readonly body: object;
-  /** For logs: which proposal the key was first used with. */
+  /** Which proposal the key was first used with: replays are bound to it. */
   readonly proposalId: string;
+  /**
+   * The request the key was first used with, beside `proposalId`. A replay must match all
+   * three (TG-001). Optional only because records stored before this field existed lack it.
+   */
+  readonly subject?: string | null;
+  readonly capability?: string;
 }
 
 export interface IdempotencyStore {

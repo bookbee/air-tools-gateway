@@ -51,7 +51,7 @@ Dev raw keys (only their digests go in `.env.example`): `airtg_read_local_dev` /
 
 **Propose and execute must be exactly right** (`src/actions/`, see handoff §7). Propose runs `prepare()` and, on success, stores a `gp_…` proposal with a TTL of at most 10 min. Execute requires an `Idempotency-Key` and runs these steps in order:
 
-1. Replay check on `(tenant, key)`.
+1. Replay check on `(tenant, key)`. The record is bound to its proposal, subject and capability: the same key with another request is `400 invalid_arguments` and does nothing (TG-001), never a replay.
 2. Tenant-scoped proposal lookup. Wrong subject, wrong capability and missing proposal all give the same 404.
 3. Per-proposal lock, then a second replay check.
 4. Expired gives 409 `proposal_expired`. Already executed gives 409 `already_executed`.

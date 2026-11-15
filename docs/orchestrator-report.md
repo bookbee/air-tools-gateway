@@ -49,7 +49,7 @@ Line numbers are in `contract.openapi.yaml`.
 | C9 | 284 | Unknown `:name` on execute vs a stored replay: which wins? | Capability lookup runs first, so `unknown_capability`. |
 | C10 | 482 (`input_schema`) | The `patternProperties` rule was added with `info.version` still 0.1.0, and uncommitted. Bump to 0.1.1? | Re-synced byte-for-byte; the registry already refused it. |
 | C11 | 518 (`truncated`) | Does "the gateway left records out" include the caller's own `limit`? | `true` whenever the customer has more orders than returned. |
-| C12 | 298, rule 8 | Same `Idempotency-Key` with a *different* `proposal_id`: replay or refuse? | Replays the first response unchanged (handoff §7.1). |
+| C12 | 298, rule 8 | Same `Idempotency-Key` with a *different* `proposal_id`: replay or refuse? | **Revised 2026-11-15 (TG-001):** refused with `400 invalid_arguments`, nothing performed or stored. Same key, same request still replays unchanged. Open: 400 (C1) or a declared 422? |
 | C13 | 284 | If `perform()` throws a 4xx instead of returning `rejected`? | Returned and stored; proposal left open. `orders.cancel` never does this. |
 
 ## Behaviour worth knowing on your side
@@ -75,3 +75,9 @@ Line numbers are in `contract.openapi.yaml`.
 - **Draining.** On SIGTERM, `/v1/ready` is 503 with `{"name":"draining","ok":false}` while
   running executes finish.
 - **Your `make sit-tools`** now runs as step 4 of our `make sit-joint`.
+- **A reused `Idempotency-Key` is refused (TG-001, C12 revised).** The same key with a
+  different `proposal_id`, `subject` or capability now gets `400 invalid_arguments`
+  ("This Idempotency-Key was already used for a different request.") and nothing performs.
+  It used to replay the first response, which could hand one customer another's result.
+  Keys derived from your `prop_` id never hit this. Open question: keep 400 (the C1
+  deviation) or declare 422 on execute?

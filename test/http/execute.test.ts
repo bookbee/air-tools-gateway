@@ -169,6 +169,44 @@ describe("idempotency", () => {
     expect((await execute(app, id)).body).toBe(first.body);
   });
 
+  it("the same key for another customer's proposal is 400 and changes nothing (TG-001)", async () => {
+    const { app, store, calls, idempotency } = harness();
+    const mine = await propose(app);
+    const first = await execute(app, mine);
+    expect(first.json()).toMatchObject({ status: "done" });
+    const other = await propose(app, { order_id: "70011" }, { subject: "cust_1002" });
+    const sizeBefore = idempotency.size;
+
+    const res = await execute(app, other, { subject: "cust_1002" });
+    expect(res.statusCode).toBe(400);
+    expect(res.json()).toMatchObject({
+      code: "invalid_arguments",
+      detail: "This Idempotency-Key was already used for a different request.",
+    });
+    expect(res.body).not.toContain("55120");
+    expect(res.body).not.toContain("1240");
+    expect(calls.cancel).toBe(1);
+    expect(idempotency.size).toBe(sizeBefore);
+    expect(await statusOf(store, "70011", "cust_1002")).not.toBe("cancelled");
+
+    // The second proposal is still open: a fresh key executes it.
+    const fresh = await execute(app, other, { subject: "cust_1002", idempotencyKey: KEY_B });
+    expect(fresh.json()).toMatchObject({ status: "done" });
+    expect(await statusOf(store, "70011", "cust_1002")).toBe("cancelled");
+    // And the original key still replays the original answer.
+    expect((await execute(app, mine)).body).toBe(first.body);
+  });
+
+  it("the same key and proposal with another subject is refused, not replayed", async () => {
+    const { app, calls } = harness();
+    const id = await propose(app);
+    await execute(app, id);
+    const wrongSubject = await execute(app, id, { subject: "cust_1002" });
+    expect(wrongSubject.statusCode).toBe(400);
+    expect(wrongSubject.json()).toMatchObject({ code: "invalid_arguments" });
+    expect(calls.cancel).toBe(1);
+  });
+
   it("a different key on an executed proposal is 409 already_executed (test 17)", async () => {
     const { app, calls } = harness();
     const id = await propose(app);
