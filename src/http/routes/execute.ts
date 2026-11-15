@@ -6,13 +6,16 @@
  *      unchanged, and nothing else happens.
  *   2. The proposal, looked up within the key's tenant. Missing, another subject, or another
  *      capability than :name are one identical 404.
- *   3. The per-proposal lock; the replay check again inside it.
+ *   3. The per-proposal lock (in-process, or Redis across replicas); the replay check again
+ *      inside it. Waiting longer than one holder's deadline → 504, not stored.
  *   4. Expired → 409 proposal_expired. Not open (executed, rejected, pending) under a new
  *      key → 409 already_executed.
  *   5. risk high → pending_approval; nothing performs.
  *   6. perform(): rejected → 200 rejected, nothing changed; else 200 done.
- *   7. The response is stored before the lock is released. A 5xx is not stored, so a retry
- *      with the same key learns the real outcome; perform() is safe to run again.
+ *   7. The response is stored before the lock is released, first writer wins. A 5xx is not
+ *      stored, so a retry with the same key learns the real outcome; perform() is safe to run
+ *      again. Every state change is a compare-and-set from `open`, so even two executes that
+ *      both got past the lock (one stalled past its expiry) finalise the proposal once.
  *   8. One `action.executed` audit line per execution, with no argument values.
  */
 import { randomBytes } from "node:crypto";
@@ -20,11 +23,12 @@ import { randomBytes } from "node:crypto";
 import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
 
 import type { IdempotencyStore, StoredResponse } from "../../actions/idempotency.js";
-import type { KeyedMutex } from "../../actions/locks.js";
-import type { Proposal, ProposalStore } from "../../actions/proposals.js";
+import { LockTimeoutError, type ProposalLock } from "../../actions/locks.js";
+import type { Proposal, ProposalState, ProposalStore } from "../../actions/proposals.js";
 import type { Clock } from "../../app.js";
 import type { CapabilityRegistry } from "../../capabilities/registry.js";
 import type { Performed, WriteCapability } from "../../capabilities/types.js";
+import type { Lifecycle } from "../../lifecycle.js";
 import type { Metrics } from "../../observability/metrics.js";
 import { EXECUTE_REQUEST_SCHEMA, lookupCapability, makeCtx, withDeadline } from "../pipeline.js";
 import { PROBLEM_CONTENT_TYPE, Problem, type ProblemBody } from "../problems.js";
@@ -50,8 +54,9 @@ export interface ExecuteDeps {
   readonly clock: Clock;
   readonly proposals: ProposalStore;
   readonly idempotency: IdempotencyStore;
-  readonly locks: KeyedMutex;
+  readonly locks: ProposalLock;
   readonly metrics: Metrics;
+  readonly lifecycle: Lifecycle;
 }
 
 interface ExecuteBody {
@@ -63,6 +68,12 @@ interface ExecuteBody {
 export function newExecutionId(): string {
   return `gx_${randomBytes(8).toString("hex")}`;
 }
+
+/**
+ * How long past the capability's deadline the lock is held at most: the store calls around
+ * perform(). A distributed lock expires after `timeoutMs + LOCK_MARGIN_MS`.
+ */
+export const LOCK_MARGIN_MS = 5000;
 
 /** One answer for "missing", "not this subject's" and "not this capability's". */
 const proposalNotFound = () => new Problem("not_found", "No such proposal.");
@@ -99,6 +110,11 @@ export function executeRoutes(deps: ExecuteDeps) {
     const proposal = await deps.proposals.get(tenant, found.id);
     if (proposal === null) return problemResponse(proposalNotFound(), found.id);
 
+    const alreadyExecuted = () =>
+      problemResponse(
+        new Problem("already_executed", "This proposal has already been executed."),
+        proposal.id,
+      );
     const now = deps.clock.now();
     if (now.getTime() >= proposal.expiresAt.getTime()) {
       return problemResponse(
@@ -106,12 +122,14 @@ export function executeRoutes(deps: ExecuteDeps) {
         proposal.id,
       );
     }
-    if (proposal.state !== "open") {
-      return problemResponse(
-        new Problem("already_executed", "This proposal has already been executed."),
-        proposal.id,
-      );
-    }
+    if (proposal.state !== "open") return alreadyExecuted();
+
+    /** Compare-and-set from open. False: another execute finalised it first. */
+    const finalise = async (to: ProposalState) => {
+      const moved = await deps.proposals.transition(tenant, proposal.id, "open", to);
+      if (!moved) request.log.warn({ proposal_id: proposal.id, to }, "action.lost_race");
+      return moved;
+    };
 
     const executionId = newExecutionId();
     const record = (status: "done" | "rejected" | "pending_approval") => {
@@ -124,7 +142,7 @@ export function executeRoutes(deps: ExecuteDeps) {
     const base = { execution_id: executionId, capability: capability.name };
 
     if (proposal.risk === "high") {
-      await deps.proposals.setState(tenant, proposal.id, "pending_approval");
+      if (!(await finalise("pending_approval"))) return alreadyExecuted();
       record("pending_approval");
       return okResponse({ status: "pending_approval", ...base }, proposal.id);
     }
@@ -153,13 +171,65 @@ export function executeRoutes(deps: ExecuteDeps) {
     }
 
     if ("rejected" in performed) {
-      await deps.proposals.setState(tenant, proposal.id, "rejected");
+      if (!(await finalise("rejected"))) return alreadyExecuted();
       record("rejected");
       return okResponse({ status: "rejected", ...base, code: performed.rejected }, proposal.id);
     }
-    await deps.proposals.setState(tenant, proposal.id, "executed");
+    // Lost race: the other execute ran perform() too, which the backend's idempotency
+    // reference (the proposal id) made a no-op. Its response is the one that counts.
+    if (!(await finalise("executed"))) return alreadyExecuted();
     record("done");
     return okResponse({ status: "done", ...base, result: performed.result }, proposal.id);
+  }
+
+  /** Steps 1–3 and 7. */
+  async function answer(
+    request: FastifyRequest,
+    capability: WriteCapability,
+    proposalId: string,
+    subject: string | null,
+    idempotencyKey: string,
+  ): Promise<StoredResponse> {
+    const { tenant } = request.identity!;
+    // 1. Replay first.
+    const replay = await deps.idempotency.get(tenant, idempotencyKey);
+    if (replay !== null) {
+      request.log.info({ proposal_id: replay.proposalId }, "action.replayed");
+      return replay;
+    }
+
+    // 2. Tenant-scoped lookup; three mismatches, one answer.
+    const proposal = await deps.proposals.get(tenant, proposalId);
+    if (
+      proposal === null ||
+      proposal.subject !== subject ||
+      proposal.capability !== capability.name
+    ) {
+      throw proposalNotFound();
+    }
+
+    // 3. One execute of this proposal at a time.
+    const holdMs = capability.timeoutMs + LOCK_MARGIN_MS;
+    try {
+      return await deps.locks.run(
+        `${tenant}:${proposal.id}`,
+        { holdMs, waitMs: holdMs },
+        async () => {
+          const again = await deps.idempotency.get(tenant, idempotencyKey);
+          if (again !== null) return again;
+          const decided = await decide(request, capability, proposal);
+          // 7. Stored before the lock is released; the first stored response wins.
+          return deps.idempotency.putIfAbsent(tenant, idempotencyKey, decided);
+        },
+      );
+    } catch (error) {
+      if (!(error instanceof LockTimeoutError)) throw error;
+      request.log.warn({ proposal_id: proposal.id }, "action.lock_timeout");
+      throw new Problem(
+        "upstream_timeout",
+        "Another execute of this proposal is still running. Retry with the same Idempotency-Key.",
+      );
+    }
   }
 
   return async function register(app: FastifyInstance) {
@@ -176,39 +246,16 @@ export function executeRoutes(deps: ExecuteDeps) {
       },
       async (request, reply) => {
         const capability = request.registered!.definition as WriteCapability;
-        const { tenant } = request.identity!;
         const { proposal_id: proposalId, subject } = request.body;
         const idempotencyKey = request.headers["idempotency-key"];
         if (capability.requiresSubject && subject === null) {
           throw new Problem("invalid_arguments", "subject: required by this capability");
         }
 
-        // 1. Replay first.
-        const replay = await deps.idempotency.get(tenant, idempotencyKey);
-        if (replay !== null) {
-          request.log.info({ proposal_id: replay.proposalId }, "action.replayed");
-          return send(request, reply, replay);
-        }
-
-        // 2. Tenant-scoped lookup; three mismatches, one answer.
-        const proposal = await deps.proposals.get(tenant, proposalId);
-        if (
-          proposal === null ||
-          proposal.subject !== subject ||
-          proposal.capability !== capability.name
-        ) {
-          throw proposalNotFound();
-        }
-
-        // 3. One execute of this proposal at a time.
-        const response = await deps.locks.run(`${tenant}\u0000${proposal.id}`, async () => {
-          const again = await deps.idempotency.get(tenant, idempotencyKey);
-          if (again !== null) return again;
-          const decided = await decide(request, capability, proposal);
-          // 7. Stored before the lock is released.
-          await deps.idempotency.put(tenant, idempotencyKey, decided);
-          return decided;
-        });
+        // Tracked, so a shutdown waits for the answer to be stored before closing the store.
+        const response = await deps.lifecycle.track(() =>
+          answer(request, capability, proposalId, subject, idempotencyKey),
+        );
         return send(request, reply, response);
       },
     );

@@ -32,7 +32,23 @@ export interface Config {
   readonly backend: { readonly mode: "fixture"; readonly fixtureDir: string };
   readonly actions: { readonly proposalTtlS: number; readonly idempotencyTtlS: number };
   readonly log: { readonly format: "json"; readonly level: LogLevel };
+  readonly store: StoreConfig;
+  readonly shutdown: { readonly drainTimeoutMs: number };
 }
+
+/**
+ * Where proposals, idempotency records and the per-proposal lock live. `memory` is one
+ * process (a single replica); `redis` is shared by every replica.
+ */
+export type StoreConfig =
+  | { readonly backend: "memory" }
+  | {
+      readonly backend: "redis";
+      /** Secret: carries the password. Never logged. */
+      readonly redisUrl: string;
+      readonly keyPrefix: string;
+      readonly commandTimeoutMs: number;
+    };
 
 export class ConfigError extends Error {
   constructor(readonly problems: readonly string[]) {
@@ -139,9 +155,38 @@ const schema = z
       })
       .strict()
       .default({}),
+    store: z
+      .object({
+        backend: z.enum(["memory", "redis"]).default("memory"),
+        redis_url: z
+          .string()
+          .regex(/^rediss?:\/\/\S+$/, "must be a redis:// or rediss:// URL")
+          .optional(),
+        key_prefix: z
+          .string()
+          .regex(/^[a-z0-9][a-z0-9_-]{0,31}$/, "must match [a-z0-9][a-z0-9_-]{0,31}")
+          .default("airtg"),
+        command_timeout_ms: int().min(10).max(10_000).default(500),
+      })
+      .strict()
+      .default({}),
+    shutdown: z
+      .object({
+        // Below Docker's stop grace period (compose sets 30 s), above the longest execute.
+        drain_timeout_ms: int().min(0).max(120_000).default(20_000),
+      })
+      .strict()
+      .default({}),
   })
   .strict()
   .superRefine((cfg, ctx) => {
+    if (cfg.store.backend === "redis" && cfg.store.redis_url === undefined) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["store", "redis_url"],
+        message: "is required when the store backend is redis",
+      });
+    }
     if (cfg.app.env === "production" && cfg.security.hash_salt === DEV_HASH_SALT) {
       ctx.addIssue({
         code: z.ZodIssueCode.custom,
@@ -243,5 +288,15 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
       idempotencyTtlS: c.actions.idempotency_ttl_s,
     },
     log: { format: c.log.format, level: c.log.level },
+    store:
+      c.store.backend === "redis"
+        ? {
+            backend: "redis",
+            redisUrl: c.store.redis_url!,
+            keyPrefix: c.store.key_prefix,
+            commandTimeoutMs: c.store.command_timeout_ms,
+          }
+        : { backend: "memory" },
+    shutdown: { drainTimeoutMs: c.shutdown.drain_timeout_ms },
   };
 }

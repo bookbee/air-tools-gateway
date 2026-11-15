@@ -19,10 +19,16 @@ describe("the contract copy", () => {
     expect((contract.info as { version: string }).version).toBe("0.1.0");
   });
 
-  const upstream = join(
-    homedir(),
-    "git/air-orchestrator-service/docs/specs/0012-tools-gateway/contract.openapi.yaml",
-  );
+  // CI checks the orchestrator's develop branch out and names the file (required there, so a
+  // wrong path fails instead of skipping). Locally, the sibling checkout, when present.
+  const named = process.env.AIR_TOOLS_GATEWAY_UPSTREAM_CONTRACT ?? "";
+  const upstream =
+    named !== ""
+      ? named
+      : join(
+          homedir(),
+          "git/air-orchestrator-service/docs/specs/0012-tools-gateway/contract.openapi.yaml",
+        );
   const sha = (path: string) => createHash("sha256").update(readFileSync(path)).digest("hex");
   let hasUpstream = false;
   try {
@@ -31,6 +37,9 @@ describe("the contract copy", () => {
   } catch {
     hasUpstream = false;
   }
+  it.runIf(named !== "")("finds the upstream contract it was told to compare against", () => {
+    expect(hasUpstream).toBe(true);
+  });
   it.runIf(hasUpstream)("is byte-identical to the orchestrator's (the authoritative copy)", () => {
     expect(sha("contract/openapi.yaml")).toBe(sha(upstream));
   });

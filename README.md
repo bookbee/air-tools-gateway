@@ -73,11 +73,30 @@ make logs / make down
 | Host             | `http://localhost:8084`         |
 | Inside `air-net` | `http://air-tools-gateway:8080` |
 
-The fixture store lives in memory and reloads at startup, so **restart to reset it**.
+The fixture order store lives in memory and reloads at startup, so **restart to reset it**.
 `make smoke` cancels order 55120 and says so when you run it twice.
+
+Proposals and idempotency records live in **process memory** on the host and with
+`INFRA=none`, and in **air-infra's Redis** (`airtg:*` keys) in the `air-net` container, so
+there a restart keeps them and a replayed execute answers as before. Set
+`AIR_TOOLS_GATEWAY__STORE__BACKEND=redis` and `…__STORE__REDIS_URL` to choose Redis anywhere;
+it is required for more than one replica. On SIGTERM the service drains: `/v1/ready` turns
+503, running executes finish and store their answers, then it exits.
 
 Other targets: `make dev` (watch mode), `make run` (compiled), `make env` (`.env` from
 `.env.example`), `make key RAW=…` (digest for a raw key), `make help` for the list.
+
+| Check             | What it does                                                                                      |
+| ----------------- | ------------------------------------------------------------------------------------------------- |
+| `make check`      | lint, typecheck, tests (Redis suites skipped)                                                     |
+| `make test-redis` | the same tests plus the Redis suites, against a throwaway Redis container                         |
+| `make smoke`      | the handoff §11 flow against a running instance                                                   |
+| `make load`       | N concurrent executes act once; lookup p50/p95/p99 (`N=`, `READS=`, `CONCURRENCY=`, `P95_MS=`)    |
+| `make sit-joint`  | rebuilds on air-net, then smoke, the orchestrator's `sit-tools`, load, and replay after a restart |
+
+CI (`.github/workflows/ci.yml`) runs the tests with Redis, builds and smoke-tests the image,
+and fails when `contract/openapi.yaml` differs from the orchestrator's `develop` copy (also
+checked daily).
 Configuration is environment variables prefixed `AIR_TOOLS_GATEWAY__` with `__` nesting; see
 [`.env.example`](.env.example).
 

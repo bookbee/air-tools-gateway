@@ -1,9 +1,9 @@
 /**
  * Proposals: what propose stored, bound to (tenant, subject, key, capability, arguments).
  *
- * v1 keeps them in process memory behind `ProposalStore`, so Redis can replace it later
- * (docs/enhancements.md). Lookups are always tenant-scoped: another tenant's proposal id is
- * simply absent.
+ * Two implementations sit behind `ProposalStore`: this file's in-memory one (one replica) and
+ * `redis/proposals.ts` (shared by replicas). Lookups are always tenant-scoped: another
+ * tenant's proposal id is simply absent.
  *
  * A proposal is kept past its expiry (for `retentionS`) so execute can answer
  * `409 proposal_expired` rather than an indistinguishable 404.
@@ -36,7 +36,12 @@ export interface ProposalStore {
   create(proposal: Proposal): Promise<void>;
   /** The tenant's proposal with this id, or null. Never another tenant's. */
   get(tenant: string, id: string): Promise<Proposal | null>;
-  setState(tenant: string, id: string, state: ProposalState): Promise<void>;
+  /**
+   * Compare-and-set: move the proposal from `from` to `to` and return true, or change nothing
+   * and return false when it is missing or no longer in `from`. This is the fence that keeps
+   * two executes (even on two replicas) from both finalising one proposal.
+   */
+  transition(tenant: string, id: string, from: ProposalState, to: ProposalState): Promise<boolean>;
 }
 
 const PROPOSAL_ID_BYTES = 6;
@@ -99,11 +104,17 @@ export class InMemoryProposalStore implements ProposalStore {
     return structuredClone(p);
   }
 
-  async setState(tenant: string, id: string, state: ProposalState): Promise<void> {
+  async transition(
+    tenant: string,
+    id: string,
+    from: ProposalState,
+    to: ProposalState,
+  ): Promise<boolean> {
     const k = key(tenant, id);
     const p = this.#items.get(k);
-    if (p === undefined) throw new Error("setState on a missing proposal");
-    this.#items.set(k, { ...p, state });
+    if (p === undefined || p.state !== from) return false;
+    this.#items.set(k, { ...p, state: to });
+    return true;
   }
 
   /** Test support. */

@@ -5,7 +5,8 @@
  * Only final answers are stored. A 5xx (timeout, backend failure) is not, so a later call with
  * the same key can learn the real outcome (handoff §7.7).
  *
- * v1 keeps them in process memory behind `IdempotencyStore`; Redis replaces it later.
+ * Two implementations sit behind `IdempotencyStore`: this file's in-memory one (one replica)
+ * and `redis/idempotency.ts` (shared by replicas).
  */
 import type { Clock } from "../app.js";
 
@@ -19,7 +20,11 @@ export interface StoredResponse {
 
 export interface IdempotencyStore {
   get(tenant: string, key: string): Promise<StoredResponse | null>;
-  put(tenant: string, key: string, response: StoredResponse): Promise<void>;
+  /**
+   * Store `response` unless the key already has one. Returns whichever response is stored
+   * afterwards: the first one always wins, so a replay never changes.
+   */
+  putIfAbsent(tenant: string, key: string, response: StoredResponse): Promise<StoredResponse>;
 }
 
 const k = (tenant: string, key: string) => `${tenant}\u0000${key}`;
@@ -44,13 +49,21 @@ export class InMemoryIdempotencyStore implements IdempotencyStore {
     return structuredClone(item.response);
   }
 
-  async put(tenant: string, key: string, response: StoredResponse): Promise<void> {
+  async putIfAbsent(
+    tenant: string,
+    key: string,
+    response: StoredResponse,
+  ): Promise<StoredResponse> {
+    // No await between the check and the write: that is what makes it atomic here.
     const now = this.#clock.now().getTime();
     for (const [key2, item] of this.#items) if (item.expiresAt <= now) this.#items.delete(key2);
+    const existing = this.#items.get(k(tenant, key));
+    if (existing !== undefined) return structuredClone(existing.response);
     this.#items.set(k(tenant, key), {
       response: structuredClone(response),
       expiresAt: now + this.#ttlMs,
     });
+    return structuredClone(response);
   }
 
   /** Test support. */

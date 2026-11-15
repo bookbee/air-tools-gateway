@@ -61,3 +61,17 @@ Line numbers are in `contract.openapi.yaml`.
 - `orders.cancel`'s `summary` is the contract example's text exactly.
 - Not found, not this subject's and not this capability's are byte-identical 404s, for both
   orders and proposals.
+
+## Since this report (2026-11-15)
+
+- **State survives restarts on air-net.** Proposals and idempotency records now live in
+  air-infra's Redis (`airtg:*`), so a replay after a gateway restart returns the stored answer.
+  The fixture orders still reset on restart.
+- **New 5xx causes, same codes.** If Redis is unavailable, propose and execute answer
+  `502 upstream_error`, and `/v1/ready` is 503 with `{"name":"store","ok":false}`. An execute
+  that waited too long behind another execute of the same proposal gets
+  `504 upstream_timeout`. Neither is stored, so retrying with the same `Idempotency-Key` is
+  safe.
+- **Draining.** On SIGTERM, `/v1/ready` is 503 with `{"name":"draining","ok":false}` while
+  running executes finish.
+- **Your `make sit-tools`** now runs as step 4 of our `make sit-joint`.

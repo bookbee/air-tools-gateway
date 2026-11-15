@@ -75,7 +75,7 @@ describe("InMemoryProposalStore", () => {
     expect(store.size).toBe(1);
   });
 
-  it("returns copies and updates state in place", async () => {
+  it("returns copies, and changes state only by compare-and-set", async () => {
     const clock = new TestClock();
     const store = new InMemoryProposalStore(clock, 60);
     const p = proposal(clock);
@@ -83,7 +83,10 @@ describe("InMemoryProposalStore", () => {
     const read = await store.get("brightcart", p.id);
     (read as { state: string }).state = "executed";
     expect((await store.get("brightcart", p.id))?.state).toBe("open");
-    await store.setState("brightcart", p.id, "executed");
+    expect(await store.transition("brightcart", p.id, "open", "executed")).toBe(true);
+    expect((await store.get("brightcart", p.id))?.state).toBe("executed");
+    expect(await store.transition("brightcart", p.id, "open", "rejected")).toBe(false);
+    expect(await store.transition("brightcart", "gp_000000000000", "open", "executed")).toBe(false);
     expect((await store.get("brightcart", p.id))?.state).toBe("executed");
   });
 

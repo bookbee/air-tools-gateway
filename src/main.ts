@@ -8,6 +8,7 @@
 import { buildApp } from "./app.js";
 import { RegistryError } from "./capabilities/registry.js";
 import { ConfigError, loadConfig } from "./config.js";
+import { installShutdown } from "./lifecycle.js";
 
 function startOrExit() {
   try {
@@ -24,11 +25,10 @@ function startOrExit() {
 
 const { config, app } = startOrExit();
 
-for (const signal of ["SIGINT", "SIGTERM"] as const) {
-  process.once(signal, () => {
-    app.log.info({ signal }, "shutdown.requested");
-    void app.close().then(() => process.exit(0));
-  });
-}
+// Drain on SIGTERM/SIGINT: ready goes 503, in-flight actions finish, then exit (src/lifecycle.ts).
+installShutdown(app, {
+  drainTimeoutMs: config.shutdown.drainTimeoutMs,
+  exit: (code) => process.exit(code),
+});
 
 await app.listen({ host: config.http.host, port: config.http.port });

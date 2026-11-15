@@ -3,6 +3,7 @@
  */
 import type { FastifyInstance } from "fastify";
 
+import type { Lifecycle } from "../../lifecycle.js";
 import type { Metrics } from "../../observability/metrics.js";
 
 export interface ReadinessCheck {
@@ -26,12 +27,18 @@ async function runCheck(check: ReadinessCheck): Promise<{ name: string; ok: bool
   }
 }
 
-export function systemRoutes(deps: { checks: readonly ReadinessCheck[]; metrics: Metrics }) {
+export function systemRoutes(deps: {
+  checks: readonly ReadinessCheck[];
+  metrics: Metrics;
+  lifecycle: Lifecycle;
+}) {
   return async function register(app: FastifyInstance) {
     app.get("/v1/health", { config: { auth: "none" } }, async () => ({ status: "ok" as const }));
 
     app.get("/v1/ready", { config: { auth: "none" } }, async (request, reply) => {
       const checks = await Promise.all(deps.checks.map(runCheck));
+      // Shutting down: tell the load balancer to stop routing here while in-flight work ends.
+      if (deps.lifecycle.draining) checks.push({ name: "draining", ok: false });
       const ready = checks.every((c) => c.ok);
       if (!ready) request.log.warn({ checks }, "ready.not_ready");
       return reply.code(ready ? 200 : 503).send({ status: ready ? "ready" : "not_ready", checks });

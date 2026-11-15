@@ -1,0 +1,112 @@
+# air-tools-gateway CI.
+#
+#   check            lint, typecheck, and the whole suite, Redis suites included (a service
+#                    container stands in for air-infra's Redis).
+#   contract-drift   contract/openapi.yaml must be byte-identical to the orchestrator's
+#                    authoritative copy on its develop branch. Runs daily too, because the
+#                    orchestrator changing its copy triggers nothing here.
+#   image            the runtime image builds and starts healthy.
+#
+# When contract-drift fails, follow CLAUDE.md "When the drift test fails": diff, re-copy
+# byte-for-byte, adapt, and log anything unversioned as a question in docs/enhancements.md §1.
+name: ci
+
+on:
+  push:
+    branches: [develop]
+  pull_request:
+    branches: [develop]
+  schedule:
+    - cron: "17 3 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  check:
+    if: github.event_name != 'schedule'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    services:
+      redis:
+        image: redis:7-alpine
+        ports: ["6379:6379"]
+        options: >-
+          --health-cmd "redis-cli ping" --health-interval 2s --health-timeout 2s
+          --health-retries 15
+    env:
+      AIR_TOOLS_GATEWAY_TEST_REDIS_URL: redis://localhost:6379/0
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: .nvmrc
+          cache: npm
+      - run: npm ci --no-audit --no-fund
+      - run: npm run lint
+      - run: npm run typecheck
+      - run: npm test
+
+  contract-drift:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - name: Check out the orchestrator's contract (read-only)
+        uses: actions/checkout@v4
+        with:
+          repository: bookbee/air-orchestrator-service
+          ref: develop
+          path: upstream
+          sparse-checkout: docs/specs/0012-tools-gateway
+          persist-credentials: false
+      - name: Compare byte-for-byte
+        run: |
+          upstream=upstream/docs/specs/0012-tools-gateway/contract.openapi.yaml
+          if cmp -s contract/openapi.yaml "$upstream"; then
+            echo "contract/openapi.yaml matches air-orchestrator-service@develop."
+            exit 0
+          fi
+          echo "::error file=contract/openapi.yaml::Contract drift: contract/openapi.yaml differs from air-orchestrator-service@develop. Re-copy it byte-for-byte (CLAUDE.md, 'When the drift test fails')."
+          diff -u contract/openapi.yaml "$upstream" || true
+          exit 1
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: .nvmrc
+          cache: npm
+      - run: npm ci --no-audit --no-fund
+      - name: The drift and contract tests, against that copy
+        env:
+          AIR_TOOLS_GATEWAY_UPSTREAM_CONTRACT: upstream/docs/specs/0012-tools-gateway/contract.openapi.yaml
+        run: npx vitest run test/contract
+
+  image:
+    if: github.event_name != 'schedule'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - run: docker build --target runtime -t air-tools-gateway:ci .
+      - name: Starts, answers health and ready, runs as a non-root user
+        run: |
+          docker run -d --name gw -p 8084:8080 \
+            -e AIR_TOOLS_GATEWAY__APP__ENV=development \
+            -e AIR_TOOLS_GATEWAY__SECURITY__HASH_SALT=air-tools-gateway-dev-salt \
+            -e AIR_TOOLS_GATEWAY__SECURITY__API_KEYS="$(grep '^AIR_TOOLS_GATEWAY__SECURITY__API_KEYS=' .env.example | cut -d= -f2-)" \
+            -e AIR_TOOLS_GATEWAY__BACKEND__FIXTURE_DIR=/app/fixtures \
+            air-tools-gateway:ci
+          for i in $(seq 1 30); do curl -sf localhost:8084/v1/ready && break; sleep 1; done
+          curl -sf localhost:8084/v1/ready
+          test "$(docker exec gw id -u)" = "10001"
+          bash sit/smoke.sh
+          docker stop gw
+          test "$(docker inspect -f '{{.State.ExitCode}}' gw)" = "0"
+        env:
+          BASE_URL: http://localhost:8084
+      - if: failure()
+        run: docker logs gw || true

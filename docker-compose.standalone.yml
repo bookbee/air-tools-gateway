@@ -5,9 +5,15 @@
 #
 # docker-compose.yml joins `air-net` as `external` on purpose, so a missing shared stack is a
 # loud failure rather than a container the orchestrator can't find. This swaps the network
-# for this project's own bridge, created and removed by compose, and changes nothing else.
+# for this project's own bridge, created and removed by compose. With no shared Redis there,
+# the stores fall back to process memory (single replica; a restart forgets them).
 
 networks:
   default:
     name: air-tools-gateway-net
     external: false
+
+services:
+  air-tools-gateway:
+    environment:
+      AIR_TOOLS_GATEWAY__STORE__BACKEND: memory

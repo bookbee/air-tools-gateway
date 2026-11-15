@@ -5,7 +5,7 @@ changes v1 scope. Section 1 also feeds the report back to the orchestrator sessi
 (handoff §12).
 
 Status key: **open** (not decided), **interim** (v1 does something specific until it is
-decided), **later** (agreed direction, not built yet).
+decided), **later** (agreed direction, not built yet), **done** (built; where it lives).
 
 ## 1. Contract questions for the orchestrator
 
@@ -48,18 +48,44 @@ These follow the contract's examples or the handoff. Revisit them only if a cons
   tell routes exist. The paths are public in the contract anyway.
 - Proposal ids are `gp_` + 12 hex characters. Execution ids are `gx_` + 8 or more hex
   characters.
+- A store (Redis) failure is `502 upstream_error` with a fixed detail, on propose and
+  execute. The contract declares 502 there and has no internal-error code (C2). Execute never
+  stores a 5xx, so a retry with the same key is safe.
+- Waiting on another execute of the same proposal for longer than one holder's deadline is
+  `504 upstream_timeout` ("still running, retry with the same Idempotency-Key"), not stored.
+- The compose service uses air-infra's Redis, database 0, with every key under `airtg:`; the
+  orchestrator uses databases 1 and 2. A key prefix rather than a database number also works
+  on a managed Redis with a single database.
 
 ## 3. Long-term enhancements
 
 ### Storage and scale
-- **later — Durable proposal and idempotency stores in air-infra's Redis.** v1 keeps them
-  in memory, behind `ProposalStore` / `IdempotencyStore`, so a restart loses open proposals and
-  the 24 h replay window. Use Redis TTLs and `SET NX` for the replay record.
-- **later — A distributed per-proposal lock.** The in-process mutex is only correct with one
-  replica. Use a Redis lock with a fencing token, or make the backend's state change
-  conditional (compare-and-set on order status), before running more than one replica.
-- **open — Graceful shutdown.** Drain in-flight executes on SIGTERM so a deploy doesn't
-  produce avoidable "outcome unknown" answers.
+- **done — Durable proposal and idempotency stores in Redis.** `AIR_TOOLS_GATEWAY__STORE__BACKEND`
+  `memory | redis` (`src/actions/redis/`). Proposals are a hash (immutable `data`, mutable
+  `state`) expiring at `expiresAt + retention`; idempotency records are `SET … NX GET`, first
+  writer wins. `/v1/ready` includes a `store` check; Redis down is 503 there and 502 on the
+  store routes, never a crash. `make test-redis` runs the suites against a throwaway Redis.
+- **done — A distributed per-proposal lock.** `RedisLock` (`SET NX PX` with a token, a
+  compare-and-delete release), held for the capability's deadline plus a margin. Behind it,
+  every state change is a compare-and-set from `open` (`ProposalStore.transition`), and
+  `orders.cancel` passes the proposal id to the backend as an idempotency reference, so a
+  lock that expired under a stalled holder still cannot cancel twice
+  (`test/http/replicas.test.ts`, "the fence holds without a working lock").
+- **done — Graceful shutdown.** `src/lifecycle.ts`: on SIGTERM `/v1/ready` reports
+  `draining`, running proposes and executes finish and store their answers before Redis
+  closes, and a drain longer than `AIR_TOOLS_GATEWAY__SHUTDOWN__DRAIN_TIMEOUT_MS` (20 s) exits
+  with code 1. Compose gives it `stop_grace_period: 30s`.
+- **open — Redis eviction policy (question for air-infra).** air-infra's local Redis runs
+  `maxmemory 256mb` with `maxmemory-policy allkeys-lru`. Under memory pressure it may evict an
+  idempotency record before its 24 h (contract rule 8), and a replay would then act on a fresh
+  answer instead of the stored one. `volatile-*` policies don't help, since every one of our
+  keys has a TTL. The fix is `noeviction`, or a separate Redis for state that must not be
+  dropped. That's air-infra's repo, so it goes to them as a question.
+- **later — Redis credentials from air-infra's broker.** The compose file sets the Redis URL
+  directly, as the orchestrator does. Fetching it from `POST /v1/resources/redis/credentials`
+  needs a service token and a grant in air-infra's `policy.local.yaml`: air-infra's change.
+- **later — A pre-stop delay** before closing (readiness 503 for a few seconds while still
+  serving) once something load-balances across replicas and needs time to stop routing.
 
 ### Real backends
 - **later — An HTTP adapter for the real order system**, using undici. It needs per-call
@@ -106,9 +132,20 @@ These follow the contract's examples or the handoff. Revisit them only if a cons
   customer was told are unknown.
 
 ### Contract and delivery
-- **later — Contract drift check in CI.** Compare `contract/openapi.yaml` to the
-  orchestrator's copy on every build and fail when they differ.
-- **open — Joint SIT automation.** Run the orchestrator and gateway together on air-net
-  with this fixture data, as a scripted check rather than a manual walkthrough.
-- **later — Load test** of the execute path under concurrency, to prove "acts once" beyond
-  the unit test.
+- **done — Contract drift check in CI.** `.github/workflows/ci.yml`, job `contract-drift`:
+  checks out `air-orchestrator-service@develop` (public, read-only) and fails on any byte of
+  difference, on every push and PR and daily. The same job runs the contract tests against
+  that copy (`AIR_TOOLS_GATEWAY_UPSTREAM_CONTRACT`). The `check` job runs the whole suite with
+  a Redis service container, and `image` builds the runtime image, smoke-tests it and checks
+  that `docker stop` exits 0.
+- **done — Joint SIT automation.** `make sit-joint` (`sit/joint.sh`): up on air-net with
+  Redis, reachable as `http://air-tools-gateway:8080` from inside the network, the smoke, the
+  orchestrator's own `make sit-tools` against this build, the load test, and a replay across
+  a restart.
+- **done — Load test.** `make load` (`scripts/load.ts`): N concurrent executes with
+  different keys give exactly one `done`; N with one key give byte-identical responses;
+  lookups report p50, p95 and p99 (optional `P95_MS` gate). Locally, 100-way contention held
+  on both stores.
+- **later — Joint SIT through the orchestrator's API.** `sit-joint` drives the gateway
+  directly and through the orchestrator's client tests. A conversation end to end through
+  `air-orchestrator-service` needs its planner, so it needs air-model-gateway too.

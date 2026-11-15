@@ -147,3 +147,56 @@ describe("loadConfig", () => {
     expect(problems).not.toContain("a-very-secret-salt");
   });
 });
+
+describe("store and shutdown settings", () => {
+  const P = "AIR_TOOLS_GATEWAY__";
+
+  it("defaults to the in-memory store and a 20 s drain", () => {
+    const config = loadConfig(baseEnv());
+    expect(config.store).toEqual({ backend: "memory" });
+    expect(config.shutdown).toEqual({ drainTimeoutMs: 20_000 });
+  });
+
+  it("reads the redis settings, with defaults", () => {
+    const config = loadConfig(
+      baseEnv({
+        [`${P}STORE__BACKEND`]: "redis",
+        [`${P}STORE__REDIS_URL`]: "redis://:pw@redis:6379/3",
+      }),
+    );
+    expect(config.store).toEqual({
+      backend: "redis",
+      redisUrl: "redis://:pw@redis:6379/3",
+      keyPrefix: "airtg",
+      commandTimeoutMs: 500,
+    });
+  });
+
+  it("requires a URL for redis", () => {
+    expect(() => loadConfig(baseEnv({ [`${P}STORE__BACKEND`]: "redis" }))).toThrow(
+      "AIR_TOOLS_GATEWAY__STORE__REDIS_URL: is required when the store backend is redis",
+    );
+  });
+
+  it("refuses a bad URL without echoing it (it carries the password)", () => {
+    const secret = "http://:hunter2-secret@redis:6379";
+    let message = "";
+    try {
+      loadConfig(baseEnv({ [`${P}STORE__BACKEND`]: "redis", [`${P}STORE__REDIS_URL`]: secret }));
+    } catch (error) {
+      expect(error).toBeInstanceOf(ConfigError);
+      message = (error as Error).message;
+    }
+    expect(message).toContain("AIR_TOOLS_GATEWAY__STORE__REDIS_URL: must be a redis://");
+    expect(message).not.toContain("hunter2");
+  });
+
+  it.each([
+    [`${P}STORE__BACKEND`, "postgres"],
+    [`${P}STORE__KEY_PREFIX`, "Has:Colon"],
+    [`${P}STORE__COMMAND_TIMEOUT_MS`, "0"],
+    [`${P}SHUTDOWN__DRAIN_TIMEOUT_MS`, "-1"],
+  ])("refuses %s=%s", (name, value) => {
+    expect(() => loadConfig(baseEnv({ [name]: value }))).toThrow(name);
+  });
+});

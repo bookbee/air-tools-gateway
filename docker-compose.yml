@@ -12,6 +12,8 @@
 # this project's own network and nothing else).
 #
 # The fixture order store is in memory: `docker compose restart air-tools-gateway` resets it.
+# Proposals and idempotency records live in air-infra's Redis (keys `airtg:*`), so they
+# survive a restart; a replayed execute still answers as it did before.
 #
 # Production never uses this file: real key digests and backends come from the deployment.
 name: air-tools-gateway
@@ -46,6 +48,13 @@ services:
       AIR_TOOLS_GATEWAY__BACKEND__FIXTURE_DIR: /app/fixtures
       AIR_TOOLS_GATEWAY__ACTIONS__PROPOSAL_TTL_S: "600"
       AIR_TOOLS_GATEWAY__ACTIONS__IDEMPOTENCY_TTL_S: "86400"
+      # air-infra's Redis on air-net, with its local-dev password (the same URI its broker
+      # grants). Every key is under `airtg:`.
+      AIR_TOOLS_GATEWAY__STORE__BACKEND: redis
+      AIR_TOOLS_GATEWAY__STORE__REDIS_URL: redis://:localdevpass@redis:6379/0
+      AIR_TOOLS_GATEWAY__STORE__KEY_PREFIX: airtg
+      # Below stop_grace_period, so a drain that overruns exits cleanly before Docker kills it.
+      AIR_TOOLS_GATEWAY__SHUTDOWN__DRAIN_TIMEOUT_MS: "20000"
     healthcheck:
       # Liveness only, as the Dockerfile's.
       test:
@@ -58,6 +67,8 @@ services:
       retries: 3
       start_period: 5s
     restart: unless-stopped
+    # SIGTERM, then this long to drain (src/lifecycle.ts) before SIGKILL.
+    stop_grace_period: 30s
 
 networks:
   default:

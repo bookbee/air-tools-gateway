@@ -99,6 +99,19 @@ test: node-check ## Run the vitest suite
 .PHONY: check
 check: lint typecheck test ## lint, typecheck and test: must pass before work is done
 
+# Redis-backed stores against a throwaway Redis (never the shared one on air-net): starts
+# redis:7-alpine on a random loopback port, runs the whole suite with it, removes it.
+REDIS_IMAGE ?= redis:7-alpine
+TEST_REDIS  := airtg-test-redis-$(shell echo $$PPID)
+
+.PHONY: test-redis
+test-redis: node-check ## Run the tests with the Redis suites too, against a throwaway container
+	@docker run -d --rm --name $(TEST_REDIS) -p 127.0.0.1::6379 $(REDIS_IMAGE) >/dev/null
+	@port=$$(docker port $(TEST_REDIS) 6379/tcp | head -1 | sed 's/.*://'); \
+	for i in $$(seq 1 30); do docker exec $(TEST_REDIS) redis-cli ping >/dev/null 2>&1 && break; sleep 0.2; done; \
+	AIR_TOOLS_GATEWAY_TEST_REDIS_URL=redis://127.0.0.1:$$port/0 $(NPM) test; \
+	status=$$?; docker rm -f $(TEST_REDIS) >/dev/null; exit $$status
+
 # No host Node? Run the same checks in node:22-slim; node_modules lives in a Docker volume
 # so Linux binaries never land in the working tree.
 NODE_IMAGE ?= node:22-slim
@@ -151,6 +164,15 @@ logs: ## Tail container logs
 .PHONY: smoke
 smoke: ## Walk the whole flow against BASE_URL (default :$(PORT)); cancels 55120, so restart to rerun
 	BASE_URL=$(BASE_URL) bash sit/smoke.sh
+
+.PHONY: load
+load: node-check ## Load test BASE_URL: contention invariants and latency (N=, READS=, CONCURRENCY=, P95_MS=); restart to rerun
+	BASE_URL=$(BASE_URL) $(if $(N),N=$(N)) $(if $(READS),READS=$(READS)) $(if $(CONCURRENCY),CONCURRENCY=$(CONCURRENCY)) $(if $(P95_MS),P95_MS=$(P95_MS)) \
+		$(NPX) tsx scripts/load.ts
+
+.PHONY: sit-joint
+sit-joint: infra-check node-check ## Joint SIT on air-net: up, reach by name, smoke, orchestrator sit-tools, load, restart replay
+	PORT=$(PORT) bash sit/joint.sh
 
 .PHONY: clean
 clean: ## Remove build output
