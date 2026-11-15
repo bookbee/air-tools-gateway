@@ -118,6 +118,36 @@ describe("orders.list_recent (test 7)", () => {
     expect(body.truncated).toBe(true);
   });
 
+  it("cust_1003, the SIT customer with seven orders: the default limit truncates", async () => {
+    const { app } = buildTestApp();
+    type Listed = {
+      truncated: boolean;
+      data: { orders: { order_id: string; status: string; cancellable: boolean }[] };
+    };
+    const first = (await call(app, "orders.list_recent", listRecent("cust_1003"))).json<Listed>();
+    expect(first.data.orders.map((o) => o.order_id)).toEqual([
+      "80101",
+      "80102",
+      "80103",
+      "80104",
+      "80105",
+    ]);
+    expect(first.truncated).toBe(true);
+    const all = (
+      await call(app, "orders.list_recent", listRecent("cust_1003", { limit: 10 }))
+    ).json<Listed>();
+    expect(all.truncated).toBe(false);
+    expect(all.data.orders.map((o) => `${o.status}:${o.cancellable}`)).toEqual([
+      "confirmed:true",
+      "packed:true",
+      "confirmed:true",
+      "in_transit:false",
+      "cancelled:false",
+      "delivered:false",
+      "delivered:false",
+    ]);
+  });
+
   it("uses the clock for as_of", async () => {
     const now = new Date("2026-11-14T10:02:11.000Z");
     const { app } = buildTestApp({ clock: { now: () => now } });

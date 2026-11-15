@@ -81,3 +81,8 @@ Line numbers are in `contract.openapi.yaml`.
   It used to replay the first response, which could hand one customer another's result.
   Keys derived from your `prop_` id never hit this. Open question: keep 400 (the C1
   deviation) or declare 422 on execute?
+- **A SIT customer, `cust_1003` (Brightcart).** Seven orders, newest first: 80101
+  confirmed, 80102 packed, 80103 confirmed (all three cancellable), 80104 in transit, 80105
+  already cancelled, 80106 delivered (returnable), 80107 delivered. `orders.list_recent` at
+  the default limit returns five with `truncated: true`. The existing customers are
+  unchanged.

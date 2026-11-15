@@ -148,6 +148,17 @@ describe("propose refuses what is not possible, and stores nothing (test 14)", (
     expect(proposals.size).toBe(0);
   });
 
+  it("cust_1003's 80105 is cancelled in the fixture itself: 422, no prior cancel needed", async () => {
+    const { app, proposals } = harness();
+    const res = await propose(app, "orders.cancel", { order_id: "80105" }, "cust_1003");
+    expect(res.statusCode).toBe(422);
+    expect(res.json()).toMatchObject({
+      code: "invalid_state",
+      detail: "The order is already cancelled.",
+    });
+    expect(proposals.size).toBe(0);
+  });
+
   it("an already cancelled order is 422 invalid_state", async () => {
     const { app, backend, proposals } = harness();
     (backend as FixtureOrdersBackend).setStatus("brightcart", "55120", "cancelled");

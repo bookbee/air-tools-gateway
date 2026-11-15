@@ -116,6 +116,22 @@ Fixture customers: Brightcart `cust_1001` (orders 48213 in transit, 55120 confir
 delivered) and `cust_1002` (70011 packed); othershop `cust_2001` (its own 55120) and `cust_1001`
 (90001). The colliding numbers make a cross-tenant leak show up as wrong data.
 
+Brightcart `cust_1003` is the SIT customer, with seven orders that cover every status:
+
+| order | status     | cancellable | for                                                                 |
+| ----- | ---------- | ----------- | ------------------------------------------------------------------- |
+| 80101 | confirmed  | yes         | three cancels in one run, without a restart                         |
+| 80102 | packed     | yes         |                                                                     |
+| 80103 | confirmed  | yes         |                                                                     |
+| 80104 | in_transit | no          | `invalid_state` "already shipped"                                   |
+| 80105 | cancelled  | no          | `invalid_state` "already cancelled", before any cancel              |
+| 80106 | delivered  | no          | returnable                                                          |
+| 80107 | delivered  | no          | not returnable; past the default `limit` of 5, so `truncated: true` |
+
+The orders of `cust_1001`, `cust_1002` and othershop are pinned by the handoff (§8), the
+orchestrator's live SIT and the web console's scenarios: add new orders under a new customer,
+never change those.
+
 ```sh
 curl -s localhost:8084/v1/tools/orders.list_recent \
   -H 'X-API-Key: airtg_read_local_dev' -H 'Content-Type: application/json' \
