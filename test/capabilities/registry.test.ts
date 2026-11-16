@@ -55,6 +55,16 @@ describe("CapabilityRegistry accepts valid definitions", () => {
 });
 
 describe("checkArgs", () => {
+  it("refuses arguments nested too deeply instead of overflowing the stack", () => {
+    let nested: Record<string, unknown> = {};
+    for (let i = 0; i < 5000; i += 1) nested = { a: nested };
+
+    expect(lookup().checkArgs(nested)).toEqual({
+      ok: false,
+      detail: "arguments: nested too deeply",
+    });
+  });
+
   const lookup = () => new CapabilityRegistry([readCap()]).get("test.lookup", "read")!;
 
   it("applies schema defaults to a copy, never to the caller's object", () => {

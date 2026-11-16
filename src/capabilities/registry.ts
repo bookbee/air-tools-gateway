@@ -140,6 +140,26 @@ function check(cap: Capability, label: string): string[] {
   return problems;
 }
 
+/** Deepest nesting `arguments` may have. Far above any declared input schema. */
+const MAX_ARGUMENT_DEPTH = 32;
+
+/** Whether a JSON value nests deeper than `limit`. Iterative, so it cannot itself overflow. */
+function exceedsDepth(root: unknown, limit: number): boolean {
+  let level: unknown[] = [root];
+  for (let depth = 0; level.length > 0; depth += 1) {
+    if (depth > limit) return true;
+    const next: unknown[] = [];
+    for (const value of level) {
+      if (typeof value !== "object" || value === null) continue;
+      for (const child of Object.values(value)) {
+        if (typeof child === "object" && child !== null) next.push(child);
+      }
+    }
+    level = next;
+  }
+  return false;
+}
+
 export class CapabilityRegistry {
   readonly #byName: ReadonlyMap<string, RegisteredCapability>;
   readonly inventory: Inventory;
@@ -181,6 +201,12 @@ export class CapabilityRegistry {
       byName.set(cap.name, {
         definition: cap,
         checkArgs(args: unknown): ArgsCheck {
+          // No capability takes nested arguments this deep, and cloning or
+          // validating a body nested thousands of levels overflows the stack:
+          // a 500 for what is the caller's malformed input.
+          if (exceedsDepth(args, MAX_ARGUMENT_DEPTH)) {
+            return { ok: false, detail: "arguments: nested too deeply" };
+          }
           // Defaults are written into a copy, never into the caller's body.
           const value: unknown = isPlainObject(args) ? structuredClone(args) : args;
           if (validate(value)) return { ok: true, value: value as Record<string, unknown> };
