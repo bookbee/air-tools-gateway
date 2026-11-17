@@ -174,6 +174,61 @@ load: node-check ## Load test BASE_URL: contention invariants and latency (N=, R
 sit-joint: infra-check node-check ## Joint SIT on air-net: up, reach by name, smoke, orchestrator sit-tools, load, restart replay
 	PORT=$(PORT) bash sit/joint.sh
 
+# ---- image and deployment (UAT and production) ------------------------------
+# This repository owns its Dockerfile and image. The Helm chart, the Terraform
+# and the deployment scripts for every core service live in
+# air-infrastructure-service (gke/), where DevOps keeps them. The targets below
+# build and push the image here, then hand over to that repository, checked out
+# next to this one (INFRA_DIR). Its docs/03-gke-runbook.md is the runbook.
+#
+#   DEPLOY_ENV        uat | prod
+#   IMAGE_REPOSITORY  <region>-docker.pkg.dev/<project>/air/air-tools-gateway
+#   IMAGE_TAG         defaults to this checkout's short commit
+#   IMAGE_DIGEST      what CI should deploy: a digest can't be re-pointed
+#   KUBE_CONTEXT      required by deploy / deploy-smoke; never defaulted, so a
+#                     deploy can't land on whatever cluster happens to be current
+#   GCP_PROJECT       the environment's project (Secret Manager)
+#   KEYS_FILE         deploy-smoke only, optional: an env file of raw API keys,
+#                     to add one authenticated call to the readiness checks
+DEPLOY_ENV ?= uat
+SERVICE    := air-tools-gateway
+IMAGE_TAG  ?= $(shell git rev-parse --short=12 HEAD 2>/dev/null || echo dev)
+INFRA_MAKE  = $(MAKE) --no-print-directory -C $(INFRA_DIR) SERVICE=$(SERVICE) DEPLOY_ENV=$(DEPLOY_ENV) \
+	KUBE_CONTEXT="$(KUBE_CONTEXT)" GCP_PROJECT="$(GCP_PROJECT)" KEYS_FILE="$(KEYS_FILE)" \
+	IMAGE_REPOSITORY="$(IMAGE_REPOSITORY)" IMAGE_DIGEST="$(IMAGE_DIGEST)" \
+	IMAGE_TAG="$(if $(IMAGE_DIGEST),,$(IMAGE_TAG))"
+
+.PHONY: require-infra-repo
+require-infra-repo:
+	@test -f $(INFRA_DIR)/gke/scripts/release.sh || { \
+		echo "air-infrastructure-service is not at $(INFRA_DIR): the charts and deploy scripts live there."; \
+		echo "Check it out next to this repository, or pass INFRA_DIR=<path>."; exit 1; }
+
+.PHONY: require-image-repository
+require-image-repository:
+	@test -n "$(IMAGE_REPOSITORY)" || { echo "set IMAGE_REPOSITORY, e.g. <region>-docker.pkg.dev/<project>/air/$(SERVICE)"; exit 1; }
+
+.PHONY: image
+image: ## Build the image locally as $(SERVICE):$(IMAGE_TAG)
+	docker build -t $(SERVICE):$(IMAGE_TAG) .
+
+.PHONY: image-push
+image-push: require-image-repository ## Build for linux/amd64 and push IMAGE_REPOSITORY:IMAGE_TAG (gcloud auth configure-docker first)
+	docker build --platform linux/amd64 -t $(IMAGE_REPOSITORY):$(IMAGE_TAG) .
+	docker push $(IMAGE_REPOSITORY):$(IMAGE_TAG)
+
+.PHONY: deploy-render
+deploy-render: require-infra-repo ## Print the manifests DEPLOY_ENV would get (SAMPLE=1 fills the project placeholders)
+	@$(INFRA_MAKE) SAMPLE="$(SAMPLE)" gke-render
+
+.PHONY: deploy
+deploy: require-infra-repo ## Deploy this service to DEPLOY_ENV (uat|prod) in KUBE_CONTEXT: helm upgrade --install
+	@$(INFRA_MAKE) gke-deploy
+
+.PHONY: deploy-smoke
+deploy-smoke: require-infra-repo ## Smoke-test this service in KUBE_CONTEXT: rollout, health, readiness (KEYS_FILE adds a real call)
+	@$(INFRA_MAKE) gke-smoke
+
 .PHONY: clean
 clean: ## Remove build output
 	rm -rf dist coverage

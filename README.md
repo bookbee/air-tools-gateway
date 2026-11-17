@@ -5,6 +5,19 @@ The AIR platform's single gateway to business systems. It serves declared **capa
 air-orchestrator-service calls it. It makes no language-model call: the orchestrator decides
 which capability a conversation needs, and this service runs it deterministically and safely.
 
+> **Part of the AIR platform.** New here? Start with the
+> [platform overview](../air-web-console/docs/platform/01-overview.md) (it has a
+> diagram of the propose → confirm → execute flow), the
+> [concepts page](../air-web-console/docs/platform/02-concepts.md) (capability,
+> planner, idempotency key) and the
+> [local setup guide](../air-web-console/docs/platform/03-local-setup.md) in
+> air-web-console.
+
+> **Status (2026-11-16).** v1 is complete against its contract and verified end to
+> end with air-orchestrator-service. **The only backend is fixture data**: sample
+> orders loaded from `fixtures/` into memory. Connecting a real order system means
+> writing an `OrdersBackend` (`src/backends/orders.ts`); it is not configuration.
+
 v1 serves three capabilities over an in-memory fixture order store:
 
 | Capability           | Kind              | What it does                                                                |
@@ -157,8 +170,44 @@ The registry refuses to start if a definition breaks a contract rule, because th
 orchestrator would otherwise drop it silently. The name must be in a namespace the
 orchestrator's channel allow-list admits before the planner sees it.
 
+## Deployment notes
+
+```sh
+export IMAGE_REPOSITORY=<region>-docker.pkg.dev/<project>/air/air-tools-gateway
+make image-push                                   # linux/amd64, tagged with this commit
+make deploy DEPLOY_ENV=uat KUBE_CONTEXT=<context> GCP_PROJECT=<project>
+make deploy-smoke DEPLOY_ENV=uat KUBE_CONTEXT=<context>
+```
+
+This repository owns its `Dockerfile` and image. The Helm chart, the values for UAT
+and production, the Terraform and the deploy scripts are in
+[air-infrastructure-service](../air-infrastructure-service/gke/README.md) (`gke/`),
+where DevOps keeps them for every core service; the targets above call into that
+checkout (`INFRA_DIR`). Its [runbook](../air-infrastructure-service/docs/03-gke-runbook.md)
+is the procedure, and `make deploy-render SAMPLE=1` prints what would be applied.
+**If this service's start command, port or user changes, update its values files
+there** (`gke/values/*/air-tools-gateway.yaml`).
+
+CI builds the image and smoke-tests it; there is no deploy pipeline yet. The points
+that matter most for a deployment:
+
+- **The container listens on 8080** and runs as uid 10001. Liveness is `/v1/health`;
+  readiness is `/v1/ready`, which turns 503 while the service drains after `SIGTERM`.
+  Allow a termination grace period of 30 seconds.
+- **More than one replica needs Redis** (`STORE__BACKEND=redis`), or each replica keeps
+  its own proposals and a confirm can land where the proposal isn't.
+- **`APP__ENV=production` refuses the development salt.** A deployment needs its own
+  `HASH_SALT` and a `read` and an `execute` key record per tenant (`make key`).
+- **The fixture backend is in the image** and resets on restart. See the status note
+  at the top.
+
 ## More
 
 - [`docs/handoff.md`](docs/handoff.md): the build brief.
 - [`docs/enhancements.md`](docs/enhancements.md): open contract questions, interim v1
   choices, and what comes after v1.
+- [`docs/orchestrator-report.md`](docs/orchestrator-report.md): the joint test report
+  with air-orchestrator-service.
+- [`CLAUDE.md`](CLAUDE.md): the compact engineering guide, also used by AI coding assistants.
+- Bugs found in this service are tracked in
+  [`air-web-console/bugs/tools-gateway/`](../air-web-console/bugs/tools-gateway/README.md).
